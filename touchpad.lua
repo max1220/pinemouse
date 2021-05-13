@@ -98,7 +98,7 @@ while true do -- TODO: Better event loop?
 		handle_kbd_ev(kbd_ev)
 	end
 
-	if (not touch_ev) and (not kbd) then
+	if (not touch_ev) and (not kbd_ev) then
 		-- TODO: try a blocking read?
 		time.sleep(0.01)
 	end
