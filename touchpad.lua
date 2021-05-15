@@ -3,30 +3,10 @@ local input = require("lua-input")
 local time = require("time")
 local codes = input.linux.input_event_codes
 
-
-
---[[ CONFIGURATION ]]--
-
--- translation table for events from the kbd.
--- key is code on the kbd value is code on the mouse.
-local key_translate = {
-	[codes.KEY_VOLUMEDOWN] = codes.BTN_LEFT,
-	[codes.KEY_VOLUMEUP] = codes.BTN_RIGHT,
-}
-
---[[ /CONFIGURATION ]]--
-
-
-
 -- open touchscreen device for absolute positions
 local touch_dev = assert(arg[1], "First argument must be the touchscreen device(e.g. /dev/input/event2)")
-local touch = assert(input.linux.new_input_source_linux(touch_dev, false, true), "Can't open touchscreen device!")
+local touch = assert(input.linux.new_input_source_linux(touch_dev, true, true), "Can't open touchscreen device!")
 touch:grab(1)
-
--- open keyboard-like device for volume buttons
-local kbd_dev = assert(arg[2], "Second argument must be trigger device(e.g. /dev/input/event1)")
-local kbd = assert(input.linux.new_input_source_linux(kbd_dev, false, true), "Can't open trigger device!")
-kbd:grab(1)
 
 -- create mouse device for relative positions/clicks
 local mouse = assert(input.linux.new_input_sink_linux())
@@ -38,68 +18,178 @@ mouse:set_bit("RELBIT", codes.REL_X)
 mouse:set_bit("RELBIT", codes.REL_Y)
 mouse:dev_setup("Virtual mouse for PinePhone", 0x1234, 0x5678, false)
 
-local sensitivity = 0.5
-
-local function syn(dev)
-	dev:write(codes.EV_SYN,codes.SYN_REPORT,0)
+local function touchpad_down(region, finger, x, y)
+	print("touchpad down", region, finger, x, y)
+	finger.last_x, finger.last_y = x, y
+end
+local function touchpad_moved(region, finger, x, y)
+	--print("touchpad moved", region, finger, x, y)
+	if x then
+		mouse:write(codes.EV_REL, codes.REL_X, x-finger.last_x)
+		mouse:write(codes.EV_SYN,codes.SYN_REPORT,0)
+		finger.last_x = x
+	end
+	if y then
+		mouse:write(codes.EV_REL, codes.REL_Y, y-finger.last_y)
+		mouse:write(codes.EV_SYN,codes.SYN_REPORT,0)
+		finger.last_y = y
+	end
+end
+local function touchpad_up(region, finger)
+	if (finger.last_x == finger.down.x) and (finger.last_y == finger.down.y) then
+		print("touchpad tap", region, finger)
+		mouse:write(codes.EV_KEY, codes.BTN_LEFT, 1)
+		mouse:write(codes.EV_SYN,codes.SYN_REPORT,0)
+		mouse:write(codes.EV_KEY, codes.BTN_LEFT, 0)
+		mouse:write(codes.EV_SYN,codes.SYN_REPORT,0)
+	end
+	print("touchpad up", region, finger)
 end
 
-local down_x = nil
-local down_y = nil
-local function handle_touch_ev(touch_ev)
-	--local type_str,code_str = input.linux:ev_to_str(touch_ev)
-	--print("touch", now, dt, ev_fmt:format(touch_ev.type, type_str or "?", touch_ev.code, code_str or "?", touch_ev.value))
-	if not down_x and (touch_ev.type == codes.EV_ABS) and (touch_ev.code == codes.ABS_X) then
-		down_x = touch_ev.value
-	elseif not down_y and (touch_ev.type == codes.EV_ABS) and (touch_ev.code == codes.ABS_Y) then
-		down_y = touch_ev.value
-	elseif down_x and (touch_ev.type == codes.EV_ABS) and (touch_ev.code == codes.ABS_X) then
-		local new_x = touch_ev.value
-		local dx = new_x-down_x
-		down_x = new_x
-		mouse:write(codes.EV_REL, codes.REL_X, dx*sensitivity)
-		syn(mouse)
-	elseif down_y and (touch_ev.type == codes.EV_ABS) and (touch_ev.code == codes.ABS_Y) then
-		local new_y = touch_ev.value
-		local dy = new_y-down_y
-		down_y = new_y
-		mouse:write(codes.EV_REL, codes.REL_Y, dy*sensitivity)
-		syn(mouse)
-	elseif (touch_ev.type == codes.EV_KEY) and (touch_ev.code == codes.BTN_TOUCH) and (touch_ev.value == 0)then
-		down_x = nil
-		down_y = nil
-	end
 
-	if down_y and (down_y > 1300) then
+local function make_key_down(key)
+	return function(region, finger, x, y)
+		print("key down", key)
+		mouse:write(codes.EV_KEY, key, 1)
+		mouse:write(codes.EV_SYN,codes.SYN_REPORT,0)
+	end
+end
+local function make_key_up(key)
+	return function(region, finger)
+		print("key up", key)
+		mouse:write(codes.EV_KEY, key, 0)
+		mouse:write(codes.EV_SYN,codes.SYN_REPORT,0)
+	end
+end
+
+
+local touch_regions = {
+	{
+		x = 0,
+		y = 0,
+		w = 720,
+		h = 1000,
+		name = "touchpad",
+		up = touchpad_up,
+		down = touchpad_down,
+		moved = touchpad_moved,
+	},
+	{
+		x = 0,
+		y = 1000,
+		w = 360,
+		h = 340,
+		name = "lmb",
+		down = make_key_down(codes.BTN_LEFT),
+		up = make_key_up(codes.BTN_LEFT),
+	},
+	{
+		x = 360,
+		y = 1000,
+		w = 360,
+		h = 340,
+		name = "rmb",
+		down = make_key_down(codes.BTN_RIGHT),
+		up = make_key_up(codes.BTN_RIGHT),
+	},
+	{
+		x = 0,
+		y = 1340,
+		w = 720,
+		h = 100,
+		name = "bottom",
+		down = function()
+			print("Bottom bar pressed. Bye!")
+			os.exit()
+		end
+	},
+}
+local function get_region(x,y)
+	for i=1, #touch_regions do
+		local region = touch_regions[i]
+		if (x>=region.x) and (y>=region.y) and (x<region.x+region.w) and (y<region.y+region.h) then
+			return region
+		end
+	end
+end
+local fingers = {}
+local function finger_down(finger_slot)
+	print("Finger down", finger_slot)
+	assert(not fingers[finger_slot])
+	fingers[finger_slot] = {}
+end
+local function finger_first_pos(finger_slot)
+	local finger = assert(fingers[finger_slot])
+	local region = get_region(finger.x, finger.y)
+	finger.down = {x=finger.x, y=finger.y}
+	if region and (region.name == "bottom") then
+		print("Bottom pressed, Bye!")
 		os.exit()
+	elseif region then
+		print("First pos ", finger_slot, finger.x, finger.y, "in region",region.name)
+		finger.region = region
+		if region.down then
+			region:down(finger, finger.x, finger.y)
+		end
+	else
+		print("First pos ", finger_slot, finger.x, finger.y)
 	end
 end
+local function finger_moved(finger_slot, x, y)
+	local finger = assert(fingers[finger_slot])
+	finger.x = x or finger.x
+	finger.y = y or finger.y
 
-local function handle_kbd_ev(kbd_ev)
-	--local type_str,code_str = input.linux:ev_to_str(kbd_ev)
-	--print("kbd", now, dt, ev_fmt:format(kbd_ev.type, type_str or "?", kbd_ev.code, code_str or "?", kbd_ev.value))
-	if (kbd_ev.type==codes.EV_KEY) and (key_translate[kbd_ev.code]) then
-		mouse:write(codes.EV_KEY, key_translate[kbd_ev.code], kbd_ev.value)
-		syn(mouse)
+	if finger.x and finger.y and (not finger.down) then
+		return finger_first_pos(finger_slot)
+	end
+
+	if finger.region and finger.region.moved then
+		finger.region:moved(finger, x,y)
+	end
+	--print("Finger moved", finger_slot, fingers[finger_slot].x, fingers[finger_slot].y)
+end
+local function finger_up(finger_slot)
+	print("Finger up", finger_slot)
+	local finger = assert(fingers[finger_slot])
+
+	if finger.region and finger.region.up then
+		finger.region:up(finger)
+	end
+
+	fingers[finger_slot] = nil
+end
+
+
+local tracking_id = nil
+local slot = 0
+local function handle_touch_ev(touch_ev)
+	if not touch_ev.type == codes.EV_ABS then
+		return
+	end
+
+	if touch_ev.code == codes.ABS_MT_TRACKING_ID then
+		if (touch_ev.value == -1) and tracking_id then
+			finger_up(slot)
+		else
+			tracking_id = touch_ev.value
+			finger_down(slot)
+		end
+	elseif touch_ev.code == codes.ABS_MT_SLOT then
+		print("slot", touch_ev.value)
+		slot = touch_ev.value
+	elseif touch_ev.code == codes.ABS_MT_POSITION_X then
+		finger_moved(slot, touch_ev.value, nil)
+	elseif touch_ev.code == codes.ABS_MT_POSITION_Y then
+		finger_moved(slot, nil, touch_ev.value)
 	end
 end
 
 
 print("Translating to touchpad events...")
 while true do -- TODO: Better event loop?
-
 	local touch_ev = touch:read()
 	if touch_ev then
 		handle_touch_ev(touch_ev)
-	end
-
-	local kbd_ev = kbd:read()
-	if kbd_ev then
-		handle_kbd_ev(kbd_ev)
-	end
-
-	if (not touch_ev) and (not kbd_ev) then
-		-- TODO: try a blocking read?
-		time.sleep(0.01)
 	end
 end
