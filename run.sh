@@ -6,5 +6,5 @@ VOLUMEKEYS="/dev/input/by-path/platform-1c21800.lradc-event"
 
 while true; do
 	./detect_pattern.lua "${VOLUMEKEYS}" "+-+-+-"
-	./touchpad.lua "${TOUCHSCREEN}" "${VOLUMEKEYS}"
+	./touchpad.lua "${TOUCHSCREEN}"
 done
