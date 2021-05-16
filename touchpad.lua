@@ -2,6 +2,7 @@
 local input = require("lua-input")
 local time = require("time")
 local codes = input.linux.input_event_codes
+local gettime = time.monotonic
 
 -- open touchscreen device for absolute positions
 local touch_dev = assert(arg[1], "First argument must be the touchscreen device(e.g. /dev/input/event2)")
@@ -18,22 +19,49 @@ mouse:set_bit("RELBIT", codes.REL_X)
 mouse:set_bit("RELBIT", codes.REL_Y)
 mouse:dev_setup("Virtual mouse for PinePhone", 0x1234, 0x5678, false)
 
+
+local transpose = false
+local x_sens = 1
+local y_sens = 1
+if arg[2] == "right-up" then
+	transpose = true
+	y_sens = -1*y_sens
+elseif arg[2] == "left-up" then
+	transpose = true
+	x_sens = -1*x_sens
+elseif arg[2] == "bottom-up" then
+	x_sens = -1
+	y_sens = -1
+elseif arg[2] ~= "normal" then
+	error("Unknown optional second argument! Needs to be one of: right-up, left-up, normal(default). Is: '"..tostring(arg[2]).."'")
+end
+
+
+
 local function touchpad_down(region, finger, x, y)
 	print("touchpad down", region, finger, x, y)
 	finger.last_x, finger.last_y = x, y
 end
 local function touchpad_moved(region, finger, x, y)
 	--print("touchpad moved", region, finger, x, y)
+	if transpose then
+		x,y = y,x
+		finger.last_x,finger.last_y = finger.last_y,finger.last_x
+	end
 	if x then
-		mouse:write(codes.EV_REL, codes.REL_X, x-finger.last_x)
+		mouse:write(codes.EV_REL, codes.REL_X, x_sens * (x-finger.last_x))
 		mouse:write(codes.EV_SYN,codes.SYN_REPORT,0)
-		finger.last_x = x
 	end
 	if y then
-		mouse:write(codes.EV_REL, codes.REL_Y, y-finger.last_y)
+		mouse:write(codes.EV_REL, codes.REL_Y, y_sens * (y-finger.last_y))
 		mouse:write(codes.EV_SYN,codes.SYN_REPORT,0)
-		finger.last_y = y
 	end
+	if transpose then
+		x,y = y,x
+		finger.last_x,finger.last_y = finger.last_y,finger.last_x
+	end
+	finger.last_x = x or finger.last_x
+	finger.last_y = y or finger.last_y
 end
 local function touchpad_up(region, finger)
 	if (finger.last_x == finger.down.x) and (finger.last_y == finger.down.y) then
@@ -116,7 +144,7 @@ local fingers = {}
 local function finger_down(finger_slot)
 	print("Finger down", finger_slot)
 	assert(not fingers[finger_slot])
-	fingers[finger_slot] = {}
+	fingers[finger_slot] = { time = gettime() }
 end
 local function finger_first_pos(finger_slot)
 	local finger = assert(fingers[finger_slot])
