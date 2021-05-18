@@ -9,6 +9,11 @@ local touch_dev = assert(arg[1], "First argument must be the touchscreen device(
 local touch = assert(input.linux.new_input_source_linux(touch_dev, true, true), "Can't open touchscreen device!")
 touch:grab(1)
 
+local function dprint(...)
+	print("\027[33mD:",...)
+	io.write("\027[0m")
+end
+
 -- create mouse device for relative positions/clicks
 local mouse = assert(input.linux.new_input_sink_linux())
 mouse:set_bit("EVBIT", codes.EV_KEY)
@@ -18,6 +23,57 @@ mouse:set_bit("EVBIT", codes.EV_REL)
 mouse:set_bit("RELBIT", codes.REL_X)
 mouse:set_bit("RELBIT", codes.REL_Y)
 mouse:dev_setup("Virtual mouse for PinePhone", 0x1234, 0x5678, false)
+
+
+-- (optional) create a new touchscreen device for forwarding touch events
+-- (in case no region matches the touchscreen just forwards events)
+local proxy_touchscreen = assert(input.linux.new_input_sink_linux())
+proxy_touchscreen:set_bit("EVBIT", codes.EV_ABS)
+proxy_touchscreen:set_bit("ABSBIT", codes.ABS_MT_SLOT)
+proxy_touchscreen:set_bit("ABSBIT", codes.ABS_MT_TRACKING_ID)
+
+-- TODO: Get these values from abs_info
+proxy_touchscreen:set_bit("ABSBIT", codes.ABS_MT_POSITION_X)
+proxy_touchscreen:set_bit("ABSBIT", codes.ABS_MT_POSITION_Y)
+
+proxy_touchscreen:set_bit("ABSBIT", codes.ABS_X)
+proxy_touchscreen:set_bit("ABSBIT", codes.ABS_Y)
+
+proxy_touchscreen:set_bit("EVBIT", codes.EV_KEY)
+proxy_touchscreen:set_bit("KEYBIT", codes.BTN_TOUCH)
+
+local info = assert(touch:abs_info(codes.ABS_X))
+local x_max = info.maximum
+assert(proxy_touchscreen:abs_setup(codes.ABS_X, info.value,info.minimum,info.maximum,info.fuzz,info.flat,info.resolution))
+
+info = assert(touch:abs_info(codes.ABS_Y))
+local y_max = info.maximum
+assert(proxy_touchscreen:abs_setup(codes.ABS_Y, info.value,info.minimum,info.maximum,info.fuzz,info.flat,info.resolution))
+
+info = assert(touch:abs_info(codes.ABS_MT_POSITION_X))
+assert(proxy_touchscreen:abs_setup(codes.ABS_MT_POSITION_X, info.value,info.minimum,info.maximum,info.fuzz,info.flat,info.resolution))
+
+info = assert(touch:abs_info(codes.ABS_MT_POSITION_Y))
+assert(proxy_touchscreen:abs_setup(codes.ABS_MT_POSITION_Y, info.value,info.minimum,info.maximum,info.fuzz,info.flat,info.resolution))
+
+
+local x_info = touch:abs_info(codes.ABS_X)
+proxy_touchscreen:abs_setup(codes.ABS_X, x_info.value,x_info.minimum,x_info.maximum,x_info.fuzz,x_info.flat,x_info.resolution)
+
+local y_info = touch:abs_info(codes.ABS_Y)
+proxy_touchscreen:abs_setup(codes.ABS_Y, y_info.value,y_info.minimum,y_info.maximum,y_info.fuzz,y_info.flat,y_info.resolution)
+
+proxy_touchscreen:dev_setup("Virtual touchscreen proxy for PinePhone", 0x2345, 0x6789, false)
+
+local _proxy_touchscreen = proxy_touchscreen
+proxy_touchscreen = {}
+function proxy_touchscreen:write(type, code, value)
+	local fmt = "Writing event to PROXY: type(0x%.4x): %.20s  code(0x%.4x): %25s  value: %d"
+	local type_str,code_str = input.linux:ev_to_str({type = type, code = code, value = value})
+	dprint(fmt:format(type, type_str or "?", code, code_str or "?", value))
+	_proxy_touchscreen:write(type, code, value)
+end
+
 
 
 local transpose = false
@@ -32,18 +88,41 @@ elseif arg[2] == "left-up" then
 elseif arg[2] == "bottom-up" then
 	x_sens = -1
 	y_sens = -1
-elseif arg[2] ~= "normal" then
+elseif arg[2] and (arg[2] ~= "normal") then
 	error("Unknown optional second argument! Needs to be one of: right-up, left-up, normal(default). Is: '"..tostring(arg[2]).."'")
+end
+
+
+local vibr_dev = arg[3]
+-- (optional) open the vibration motor input device(for force feedback)
+local vibr
+local function ff() end
+local function patt()
+	for _=1, 3 do
+		ff()
+		ff()
+		time.sleep(0.3)
+	end
+end
+if vibr_dev then
+	vibr = assert(input.linux.new_input_source_linux(vibr_dev, true, true), "Can't open!")
+	vibr:vibr_gain(0xffff)
+	local ff_effect_id = assert(vibr:vibr_effect(80,0,0, 0xffff), "Can't upload effect!")
+	assert(vibr:vibr_start(ff_effect_id, 1), "Can't start effect")
+	ff = function()
+		vibr:vibr_start(ff_effect_id, 1)
+	end
 end
 
 
 
 local function touchpad_down(region, finger, x, y)
-	print("touchpad down", region, finger, x, y)
+	dprint("touchpad down", region, finger, x, y)
 	finger.last_x, finger.last_y = x, y
+	ff()
 end
 local function touchpad_moved(region, finger, x, y)
-	--print("touchpad moved", region, finger, x, y)
+	--dprint("touchpad moved", region, finger, x, y)
 	if transpose then
 		x,y = y,x
 		finger.last_x,finger.last_y = finger.last_y,finger.last_x
@@ -65,38 +144,42 @@ local function touchpad_moved(region, finger, x, y)
 end
 local function touchpad_up(region, finger)
 	if (finger.last_x == finger.down.x) and (finger.last_y == finger.down.y) then
-		print("touchpad tap", region, finger)
+		dprint("touchpad tap", region, finger)
 		mouse:write(codes.EV_KEY, codes.BTN_LEFT, 1)
 		mouse:write(codes.EV_SYN,codes.SYN_REPORT,0)
 		mouse:write(codes.EV_KEY, codes.BTN_LEFT, 0)
 		mouse:write(codes.EV_SYN,codes.SYN_REPORT,0)
 	end
-	print("touchpad up", region, finger)
+	dprint("touchpad up", region, finger)
+	ff()
 end
 
 
 local function make_key_down(key)
 	return function(region, finger, x, y)
-		print("key down", key)
+		dprint("key down", key)
 		mouse:write(codes.EV_KEY, key, 1)
 		mouse:write(codes.EV_SYN,codes.SYN_REPORT,0)
+		ff()
 	end
 end
 local function make_key_up(key)
 	return function(region, finger)
-		print("key up", key)
+		dprint("key up", key)
 		mouse:write(codes.EV_KEY, key, 0)
 		mouse:write(codes.EV_SYN,codes.SYN_REPORT,0)
+		ff()
 	end
 end
 
 
+
 local touch_regions = {
 	{
-		x = 0,
-		y = 0,
-		w = 720,
-		h = 1000,
+		x = x_max*0.1,
+		y = 60,
+		w = x_max*0.8,
+		h = 700,
 		name = "touchpad",
 		up = touchpad_up,
 		down = touchpad_down,
@@ -104,32 +187,33 @@ local touch_regions = {
 	},
 	{
 		x = 0,
-		y = 1000,
-		w = 360,
-		h = 340,
+		y = 0,
+		w = x_max*0.5,
+		h = 60,
 		name = "lmb",
 		down = make_key_down(codes.BTN_LEFT),
 		up = make_key_up(codes.BTN_LEFT),
 	},
 	{
-		x = 360,
-		y = 1000,
-		w = 360,
-		h = 340,
+		x = x_max*0.5,
+		y = 0,
+		w = x_max*0.5,
+		h = 60,
 		name = "rmb",
 		down = make_key_down(codes.BTN_RIGHT),
 		up = make_key_up(codes.BTN_RIGHT),
 	},
 	{
 		x = 0,
-		y = 1340,
-		w = 720,
-		h = 100,
+		y = y_max-90,
+		w = x_max,
+		h = 90,
 		name = "bottom",
 		down = function()
-			print("Bottom bar pressed. Bye!")
-			os.exit()
-		end
+			print("Bottom pressed, bye!")
+			patt()
+			os.exit(0)
+		end,
 	},
 }
 local function get_region(x,y)
@@ -140,28 +224,63 @@ local function get_region(x,y)
 		end
 	end
 end
+
+local tracking_id = nil
+local slot = 0
+
+local function proxy_first(finger_slot, x, y)
+	dprint("PROXY FIRST", finger_slot)
+	proxy_touchscreen:write(codes.EV_ABS, codes.ABS_MT_SLOT, finger_slot)
+	proxy_touchscreen:write(codes.EV_ABS, codes.ABS_MT_TRACKING_ID, tracking_id)
+	proxy_touchscreen:write(codes.EV_ABS, codes.ABS_MT_POSITION_X, x)
+	proxy_touchscreen:write(codes.EV_ABS, codes.ABS_MT_POSITION_Y, y)
+	proxy_touchscreen:write(codes.EV_SYN, codes.SYN_REPORT, 0)
+end
+local function proxy_moved(finger_slot, x ,y)
+	dprint("PROXY MOVED", finger_slot, x, y)
+	if x then
+		proxy_touchscreen:write(codes.EV_ABS, codes.ABS_MT_SLOT, finger_slot)
+		proxy_touchscreen:write(codes.EV_ABS, codes.ABS_MT_POSITION_X, x)
+		proxy_touchscreen:write(codes.EV_SYN,codes.SYN_REPORT,0)
+	end
+	if y then
+		proxy_touchscreen:write(codes.EV_ABS, codes.ABS_MT_SLOT, finger_slot)
+		proxy_touchscreen:write(codes.EV_ABS, codes.ABS_MT_POSITION_Y, y)
+		proxy_touchscreen:write(codes.EV_SYN,codes.SYN_REPORT,0)
+	end
+end
+local function proxy_up(finger_slot)
+	dprint("PROXY UP", finger_slot)
+	proxy_touchscreen:write(codes.EV_ABS, codes.ABS_MT_SLOT, finger_slot)
+	proxy_touchscreen:write(codes.EV_ABS, codes.ABS_MT_TRACKING_ID, -1)
+	if finger_slot == 0 then
+		--proxy_touchscreen:write(codes.EV_KEY, codes.BTN_TOUCH, 0)
+	end
+	proxy_touchscreen:write(codes.EV_SYN, codes.SYN_REPORT, 0)
+end
+
+
 local fingers = {}
 local function finger_down(finger_slot)
-	print("Finger down", finger_slot)
-	assert(not fingers[finger_slot])
+	dprint("Finger down", finger_slot)
+	local finger = fingers[finger_slot]
+	assert(not finger)
 	fingers[finger_slot] = { time = gettime() }
+	--proxy_down(finger_slot)
 end
 local function finger_first_pos(finger_slot)
 	local finger = assert(fingers[finger_slot])
 	local region = get_region(finger.x, finger.y)
 	finger.down = {x=finger.x, y=finger.y}
-	if region and (region.name == "bottom") then
-		print("Bottom pressed, Bye!")
-		os.exit()
-	elseif region then
-		print("First pos ", finger_slot, finger.x, finger.y, "in region",region.name)
+	if region then
 		finger.region = region
 		if region.down then
 			region:down(finger, finger.x, finger.y)
 		end
 	else
-		print("First pos ", finger_slot, finger.x, finger.y)
+		proxy_first(finger_slot, finger.x, finger.y)
 	end
+	dprint("First pos ", finger_slot, finger.x, finger.y, region and "in region "..region.name or "in PROXY area(ignore)")
 end
 local function finger_moved(finger_slot, x, y)
 	local finger = assert(fingers[finger_slot])
@@ -169,42 +288,46 @@ local function finger_moved(finger_slot, x, y)
 	finger.y = y or finger.y
 
 	if finger.x and finger.y and (not finger.down) then
-		return finger_first_pos(finger_slot)
+		finger_first_pos(finger_slot)
 	end
 
 	if finger.region and finger.region.moved then
 		finger.region:moved(finger, x,y)
+	elseif proxy_touchscreen then
+		proxy_moved(finger_slot, x, y)
 	end
-	--print("Finger moved", finger_slot, fingers[finger_slot].x, fingers[finger_slot].y)
+	--dprint("Finger moved", finger_slot, fingers[finger_slot].x, fingers[finger_slot].y)
 end
 local function finger_up(finger_slot)
-	print("Finger up", finger_slot)
+	dprint("Finger up", finger_slot)
 	local finger = assert(fingers[finger_slot])
 
 	if finger.region and finger.region.up then
 		finger.region:up(finger)
+	elseif proxy_touchscreen then
+		proxy_up(finger_slot)
 	end
 
 	fingers[finger_slot] = nil
 end
 
 
-local tracking_id = nil
-local slot = 0
+
 local function handle_touch_ev(touch_ev)
 	if not touch_ev.type == codes.EV_ABS then
 		return
 	end
 
 	if touch_ev.code == codes.ABS_MT_TRACKING_ID then
+		tracking_id = touch_ev.value
+		dprint("tracking_id", tracking_id)
 		if (touch_ev.value == -1) and tracking_id then
 			finger_up(slot)
 		else
-			tracking_id = touch_ev.value
 			finger_down(slot)
 		end
 	elseif touch_ev.code == codes.ABS_MT_SLOT then
-		print("slot", touch_ev.value)
+		dprint("slot", touch_ev.value)
 		slot = touch_ev.value
 	elseif touch_ev.code == codes.ABS_MT_POSITION_X then
 		finger_moved(slot, touch_ev.value, nil)
@@ -214,7 +337,8 @@ local function handle_touch_ev(touch_ev)
 end
 
 
-print("Translating to touchpad events...")
+dprint("Translating to touchpad events...")
+patt()
 while true do -- TODO: Better event loop?
 	local touch_ev = touch:read()
 	if touch_ev then
