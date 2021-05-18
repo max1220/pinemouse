@@ -9,15 +9,19 @@ touchpad(with volume keys for left/right mouse buttons).
 
 This setup requires two of my Lua libraries,
  * lua-input
-  - for reading kernel input events and creating new input devices
-  - requires v2 branch!
+   - for reading kernel input events and creating new input devices
+   - requires `vibr` branch!
+   - requires kernel headers
+     * you might be able to get away with your hosts, you only need one file
  * lua-time
-  - for sleep and getting time
+   - for sleep and getting time
+
+
 
 ### Mobian(untested):
 ```
 sudo apt update -y
-sudo apt install -y build-essentials git lua5.1 lua5.1-dev iblua5.1-0-dev
+sudo apt install -y build-essentials git lua5.1 lua5.1-dev liblua5.1-0-dev
 
 git clone -b v2 https://github.com/max1220/lua-input
 cd lua-input
